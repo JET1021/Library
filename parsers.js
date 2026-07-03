@@ -25,6 +25,36 @@ async function blobToDataURL(blob) {
   });
 }
 
+// ---------- Détection automatique série + tome/chapitre depuis le nom de fichier ----------
+// Ex: "One Piece Tome 12.cbz" -> { series: "One Piece", volume: 12 }
+// Ex: "Naruto - Chapitre 004.cbz" -> { series: "Naruto", volume: 4 }
+// Ex: "Berserk #34.cbz" -> { series: "Berserk", volume: 34 }
+// Ex: "Solo Leveling 07.pdf" -> { series: "Solo Leveling", volume: 7 }
+function parseSeriesAndVolume(filename) {
+  const base = filename.replace(/\.[^/.]+$/, "").trim();
+
+  const patterns = [
+    /^(.*?)[\s_\-–]+(?:tome|vol(?:ume)?\.?|t)[\s_\-.]*0*(\d{1,4})\b/i,
+    /^(.*?)[\s_\-–]+(?:chapitre|chapter|ch\.?|episode|épisode|ep\.?)[\s_\-.]*0*(\d{1,4})\b/i,
+    /^(.*?)[\s_\-–]*#0*(\d{1,4})\b/,
+    /^(.*?)[\s_\-–]+0*(\d{1,4})$/, // numéro final tout seul
+  ];
+
+  for (const re of patterns) {
+    const m = base.match(re);
+    if (m) {
+      let series = m[1].trim().replace(/[\s_\-–]+$/, "");
+      series = series.replace(/_/g, " ").replace(/\s{2,}/g, " ").trim();
+      const volume = parseInt(m[2], 10);
+      if (series.length > 0 && !isNaN(volume)) {
+        return { series, volume };
+      }
+    }
+  }
+  // pas de numéro détecté : toute la chaîne est la série, pas de tome
+  return { series: base.replace(/_/g, " ").replace(/\s{2,}/g, " ").trim(), volume: null };
+}
+
 // ---------- PDF ----------
 async function parsePDF(file) {
   const buf = await file.arrayBuffer();
