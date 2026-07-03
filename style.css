@@ -138,6 +138,24 @@ main {
   position: relative;
 }
 
+.group-header {
+  grid-column: 1 / -1;
+  font-family: "Fraunces", serif;
+  font-size: 15px;
+  color: var(--gold-bright);
+  letter-spacing: .02em;
+  padding: 10px 0 2px;
+  margin-top: 4px;
+  border-bottom: 1px solid #2c3140;
+}
+.group-header:first-child { margin-top: 0; }
+
+#sortControls .chip.active {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--ink);
+}
+
 #library.dragover::before {
   content: "Dépose tes fichiers ici";
   position: fixed;
