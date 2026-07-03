@@ -26,6 +26,7 @@
     <input id="searchInput" type="search" placeholder="Chercher un titre, un auteur, un tag…" autocomplete="off">
   </div>
   <div class="shelf-filters" id="shelfFilters"></div>
+  <div class="shelf-filters" id="sortControls"></div>
 </header>
 
 <div class="count-row" id="count">0 ouvrage</div>
@@ -68,6 +69,10 @@
     <form id="editForm">
       <label for="editTitle">Titre</label>
       <input id="editTitle" required>
+      <label for="editSeries">Série</label>
+      <input id="editSeries" placeholder="ex: One Piece">
+      <label for="editVolume">Tome / chapitre (numéro)</label>
+      <input id="editVolume" type="number" placeholder="ex: 12">
       <label for="editAuthor">Auteur</label>
       <input id="editAuthor">
       <label for="editShelf">Étagère</label>
