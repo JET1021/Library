@@ -12,6 +12,7 @@ let state = {
   search: "",
   sort: "serie", // "serie" | "alpha" | "recent"
   currentReader: null,
+  currentSeriesName: null, // série actuellement ouverte dans la modale "pile"
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -53,7 +54,8 @@ function buildShelfFilters() {
 function buildSortControls() {
   const wrap = $("#sortControls");
   const options = [
-    { key: "serie", label: "Par série" },
+    { key: "serie", label: "Piles par série" },
+    { key: "author", label: "Par auteur" },
     { key: "alpha", label: "Alphabétique" },
     { key: "recent", label: "Date d'ajout" },
   ];
@@ -84,6 +86,7 @@ function bindUI() {
   $("#closeEdit").addEventListener("click", closeEdit);
   $("#editForm").addEventListener("submit", saveEdit);
   $("#deleteBookBtn").addEventListener("click", deleteFromEdit);
+  $("#closeSeries").addEventListener("click", closeSeriesView);
 
   // drag & drop sur toute la zone bibliothèque
   const drop = $("#library");
@@ -105,6 +108,10 @@ function bindUI() {
 }
 
 // ---------- Ajout de fichiers ----------
+function normalizedName(name) {
+  return name.trim().toLowerCase();
+}
+
 async function handleFiles(fileList) {
   const files = Array.from(fileList);
   if (!files.length) return;
@@ -113,18 +120,57 @@ async function handleFiles(fileList) {
   const others = files.filter((f) => !IMAGE_EXT.includes(extOf(f.name)));
 
   $("#addBtn").disabled = true;
-  $("#addBtn").textContent = "Import en cours…";
+
+  // ensemble des noms de fichiers déjà présents dans la bibliothèque, pour éviter les doublons
+  const existing = await DB.getAllBooks();
+  const knownNames = new Set(
+    existing.filter((b) => b.originalFilename).map((b) => normalizedName(b.originalFilename))
+  );
+
+  const skipped = [];
+  let imported = 0;
+  const totalToImport = (images.length ? 1 : 0) + others.length;
+  let done = 0;
+
+  const updateProgress = () => {
+    $("#addBtn").textContent = `Import ${done}/${totalToImport}…`;
+  };
+  updateProgress();
 
   try {
-    // les images sélectionnées ensemble = un seul livre (planches)
+    // les images sélectionnées ensemble = un seul livre (planches), pas de check doublon dessus
     if (images.length) {
-      await importOne(images.length === 1 ? images : images, true);
+      await importOne(images, true, knownNames);
+      imported++;
+      done++;
+      updateProgress();
     }
     for (const file of others) {
-      await importOne(file, false);
+      const key = normalizedName(file.name);
+      if (knownNames.has(key)) {
+        skipped.push(file.name);
+        done++;
+        updateProgress();
+        continue;
+      }
+      const added = await importOne(file, false, knownNames);
+      if (added) {
+        imported++;
+        knownNames.add(key);
+      }
+      done++;
+      updateProgress();
     }
     await refreshLibrary();
     updateStorageBar();
+
+    if (skipped.length) {
+      alert(
+        `${skipped.length} fichier${skipped.length > 1 ? "s" : ""} déjà présent${
+          skipped.length > 1 ? "s" : ""
+        } dans la bibliothèque, ignoré${skipped.length > 1 ? "s" : ""} :\n\n` + skipped.join("\n")
+      );
+    }
   } catch (err) {
     alert(err.message || "Erreur pendant l'import");
     console.error(err);
@@ -140,6 +186,7 @@ async function importOne(fileOrFiles, isImageGroup) {
   let titleGuess;
   let seriesGuess = "";
   let volumeGuess = null;
+  let originalFilename = null;
   if (isImageGroup) {
     parsed = await parseImageSet(fileOrFiles);
     titleGuess = "Planches importées";
@@ -150,8 +197,9 @@ async function importOne(fileOrFiles, isImageGroup) {
     const guess = parseSeriesAndVolume(fileOrFiles.name);
     seriesGuess = guess.series || titleGuess;
     volumeGuess = guess.volume;
+    originalFilename = fileOrFiles.name;
   }
-  if (!parsed) return;
+  if (!parsed) return null;
 
   const id = uid();
   const book = {
@@ -162,6 +210,7 @@ async function importOne(fileOrFiles, isImageGroup) {
     tags: [],
     series: seriesGuess,
     volume: volumeGuess,
+    originalFilename,
     format: parsed.format,
     pageCount: parsed.pageCount,
     addedAt: Date.now(),
@@ -187,6 +236,18 @@ function sortBooks(list) {
     copy.sort((a, b) => a.title.localeCompare(b.title, "fr", { sensitivity: "base" }));
   } else if (state.sort === "recent") {
     copy.sort((a, b) => b.addedAt - a.addedAt);
+  } else if (state.sort === "author") {
+    copy.sort((a, b) => {
+      const aa = (a.author || "Auteur inconnu").toLowerCase();
+      const ab = (b.author || "Auteur inconnu").toLowerCase();
+      if (aa !== ab) return aa.localeCompare(ab, "fr", { sensitivity: "base" });
+      const sa = (a.series || a.title).toLowerCase();
+      const sb = (b.series || b.title).toLowerCase();
+      if (sa !== sb) return sa.localeCompare(sb, "fr", { sensitivity: "base" });
+      const va = a.volume ?? Infinity;
+      const vb = b.volume ?? Infinity;
+      return va - vb;
+    });
   } else {
     // "serie" : par série (alpha), puis par tome (numérique), puis par titre
     copy.sort((a, b) => {
@@ -202,8 +263,17 @@ function sortBooks(list) {
   return copy;
 }
 
-function renderLibrary() {
-  const grid = $("#library");
+function groupBySeries(list) {
+  const groups = new Map();
+  for (const book of list) {
+    const key = book.series || book.title;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(book);
+  }
+  return groups;
+}
+
+function getFilteredSortedList() {
   let list = state.books;
   if (state.filter !== "Tous") list = list.filter((b) => b.shelf === state.filter);
   if (state.search)
@@ -214,61 +284,139 @@ function renderLibrary() {
         (b.series || "").toLowerCase().includes(state.search) ||
         (b.tags || []).some((t) => t.toLowerCase().includes(state.search))
     );
+  return sortBooks(list);
+}
 
-  list = sortBooks(list);
+function renderLibrary() {
+  const grid = $("#library");
+  const list = getFilteredSortedList();
 
   $("#emptyState").style.display = list.length ? "none" : "flex";
-  $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
 
   grid.querySelectorAll(".book-card, .group-header").forEach((n) => n.remove());
-
   const frag = document.createDocumentFragment();
-  let lastSeries = null;
-  for (const book of list) {
-    if (state.sort === "serie") {
-      const seriesLabel = book.series || book.title;
-      if (seriesLabel !== lastSeries) {
-        const header = document.createElement("div");
-        header.className = "group-header";
-        header.textContent = seriesLabel;
-        frag.appendChild(header);
-        lastSeries = seriesLabel;
+
+  if (state.sort === "serie") {
+    const groups = groupBySeries(list);
+    $("#count").textContent = `${groups.size} série${groups.size > 1 ? "s" : ""} · ${list.length} ouvrage${
+      list.length > 1 ? "s" : ""
+    }`;
+    for (const [seriesName, books] of groups) {
+      if (books.length > 1) {
+        frag.appendChild(createStackCardElement(seriesName, books));
+      } else {
+        frag.appendChild(createBookCardElement(books[0]));
       }
     }
-    const card = document.createElement("div");
-    card.className = "book-card";
-    const coverURL = book.coverBlob ? URL.createObjectURL(book.coverBlob) : null;
-    const metaBits = [];
-    if (book.volume != null) metaBits.push("T" + book.volume);
-    metaBits.push(book.shelf);
-    if (book.pageCount) metaBits.push(book.pageCount + " p.");
-    card.innerHTML = `
-      <div class="cover-wrap">
-        ${
-          coverURL
-            ? `<img src="${coverURL}" alt="${escapeHTML(book.title)}" loading="lazy">`
-            : `<div class="cover-fallback">${escapeHTML(book.title.slice(0, 2).toUpperCase())}</div>`
-        }
-        <span class="format-badge">${book.format}</span>
-        <button class="edit-btn" title="Modifier" data-id="${book.id}">✎</button>
-      </div>
-      <div class="book-title">${escapeHTML(book.title)}</div>
-      <div class="book-meta">${escapeHTML(metaBits.join(" · "))}</div>
-    `;
-    card.querySelector(".cover-wrap img, .cover-fallback")?.addEventListener("click", () => openReader(book));
-    card.querySelector(".edit-btn").addEventListener("click", (e) => {
-      e.stopPropagation();
-      openEdit(book);
-    });
-    frag.appendChild(card);
+  } else if (state.sort === "author") {
+    $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
+    let lastAuthor = null;
+    for (const book of list) {
+      const authorLabel = book.author || "Auteur inconnu";
+      if (authorLabel !== lastAuthor) {
+        const header = document.createElement("div");
+        header.className = "group-header";
+        header.textContent = authorLabel;
+        frag.appendChild(header);
+        lastAuthor = authorLabel;
+      }
+      frag.appendChild(createBookCardElement(book));
+    }
+  } else {
+    $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
+    for (const book of list) {
+      frag.appendChild(createBookCardElement(book));
+    }
   }
   grid.appendChild(frag);
+}
+
+function createBookCardElement(book) {
+  const card = document.createElement("div");
+  card.className = "book-card";
+  const coverURL = book.coverBlob ? URL.createObjectURL(book.coverBlob) : null;
+  const metaBits = [];
+  if (book.volume != null) metaBits.push("T" + book.volume);
+  metaBits.push(book.shelf);
+  if (book.pageCount) metaBits.push(book.pageCount + " p.");
+  card.innerHTML = `
+    <div class="cover-wrap">
+      ${
+        coverURL
+          ? `<img src="${coverURL}" alt="${escapeHTML(book.title)}" loading="lazy">`
+          : `<div class="cover-fallback">${escapeHTML(book.title.slice(0, 2).toUpperCase())}</div>`
+      }
+      <span class="format-badge">${book.format}</span>
+      <button class="edit-btn" title="Modifier" data-id="${book.id}">✎</button>
+    </div>
+    <div class="book-title">${escapeHTML(book.title)}</div>
+    <div class="book-meta">${escapeHTML(metaBits.join(" · "))}</div>
+  `;
+  card.querySelector(".cover-wrap img, .cover-fallback")?.addEventListener("click", () => openReader(book));
+  card.querySelector(".edit-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    openEdit(book);
+  });
+  return card;
+}
+
+function createStackCardElement(seriesName, books) {
+  // représentant de la pile : le tome le plus bas (ou le premier alphabétiquement)
+  const sorted = [...books].sort((a, b) => (a.volume ?? Infinity) - (b.volume ?? Infinity));
+  const rep = sorted[0];
+  const card = document.createElement("div");
+  card.className = "book-card stack-card";
+  const coverURL = rep.coverBlob ? URL.createObjectURL(rep.coverBlob) : null;
+  card.innerHTML = `
+    <div class="cover-wrap">
+      ${
+        coverURL
+          ? `<img src="${coverURL}" alt="${escapeHTML(seriesName)}" loading="lazy">`
+          : `<div class="cover-fallback">${escapeHTML(seriesName.slice(0, 2).toUpperCase())}</div>`
+      }
+      <span class="stack-badge">×${books.length}</span>
+    </div>
+    <div class="book-title">${escapeHTML(seriesName)}</div>
+    <div class="book-meta">${books.length} tome${books.length > 1 ? "s" : ""}</div>
+  `;
+  card.addEventListener("click", () => openSeriesView(seriesName, books));
+  return card;
 }
 
 function escapeHTML(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+// ---------- Vue "pile" d'une série ----------
+function openSeriesView(seriesName, books) {
+  state.currentSeriesName = seriesName;
+  renderSeriesView();
+  $("#seriesModal").classList.add("open");
+}
+
+function renderSeriesView() {
+  const seriesName = state.currentSeriesName;
+  if (!seriesName) return;
+  const books = state.books
+    .filter((b) => (b.series || b.title) === seriesName)
+    .sort((a, b) => (a.volume ?? Infinity) - (b.volume ?? Infinity) || a.title.localeCompare(b.title, "fr"));
+
+  $("#seriesTitle").textContent = seriesName;
+  $("#seriesCount").textContent = `${books.length} tome${books.length > 1 ? "s" : ""}`;
+  const grid = $("#seriesGrid");
+  grid.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  for (const book of books) {
+    frag.appendChild(createBookCardElement(book));
+  }
+  grid.appendChild(frag);
+}
+
+function closeSeriesView() {
+  $("#seriesModal").classList.remove("open");
+  state.currentSeriesName = null;
 }
 
 // ---------- Édition ----------
@@ -304,6 +452,7 @@ async function saveEdit(e) {
   await DB.updateBook(book);
   closeEdit();
   await refreshLibrary();
+  if (state.currentSeriesName) renderSeriesView();
 }
 async function deleteFromEdit() {
   if (!confirm("Supprimer définitivement ce livre de la bibliothèque locale ?")) return;
@@ -311,6 +460,7 @@ async function deleteFromEdit() {
   closeEdit();
   await refreshLibrary();
   updateStorageBar();
+  if (state.currentSeriesName) renderSeriesView();
 }
 
 // ---------- Lecteur ----------
