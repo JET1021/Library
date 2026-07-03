@@ -10,6 +10,7 @@ let state = {
   books: [],
   filter: "Tous",
   search: "",
+  sort: "serie", // "serie" | "alpha" | "recent"
   currentReader: null,
 };
 
@@ -23,6 +24,7 @@ function uid() {
 // ---------- Boot ----------
 window.addEventListener("DOMContentLoaded", async () => {
   buildShelfFilters();
+  buildSortControls();
   bindUI();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(console.error);
@@ -46,6 +48,27 @@ function buildShelfFilters() {
     });
   });
   wrap.querySelector('[data-shelf="Tous"]').classList.add("active");
+}
+
+function buildSortControls() {
+  const wrap = $("#sortControls");
+  const options = [
+    { key: "serie", label: "Par série" },
+    { key: "alpha", label: "Alphabétique" },
+    { key: "recent", label: "Date d'ajout" },
+  ];
+  wrap.innerHTML = options
+    .map((o) => `<button class="chip" data-sort="${o.key}">${o.label}</button>`)
+    .join("");
+  wrap.querySelectorAll(".chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.sort = btn.dataset.sort;
+      wrap.querySelectorAll(".chip").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      renderLibrary();
+    });
+  });
+  wrap.querySelector(`[data-sort="${state.sort}"]`).classList.add("active");
 }
 
 function bindUI() {
@@ -115,12 +138,18 @@ async function handleFiles(fileList) {
 async function importOne(fileOrFiles, isImageGroup) {
   let parsed;
   let titleGuess;
+  let seriesGuess = "";
+  let volumeGuess = null;
   if (isImageGroup) {
     parsed = await parseImageSet(fileOrFiles);
     titleGuess = "Planches importées";
+    seriesGuess = titleGuess;
   } else {
     parsed = await parseFile(fileOrFiles);
     titleGuess = fileOrFiles.name.replace(/\.[^/.]+$/, "");
+    const guess = parseSeriesAndVolume(fileOrFiles.name);
+    seriesGuess = guess.series || titleGuess;
+    volumeGuess = guess.volume;
   }
   if (!parsed) return;
 
@@ -131,6 +160,8 @@ async function importOne(fileOrFiles, isImageGroup) {
     author: "",
     shelf: "Manga",
     tags: [],
+    series: seriesGuess,
+    volume: volumeGuess,
     format: parsed.format,
     pageCount: parsed.pageCount,
     addedAt: Date.now(),
@@ -150,6 +181,27 @@ async function refreshLibrary() {
   renderLibrary();
 }
 
+function sortBooks(list) {
+  const copy = [...list];
+  if (state.sort === "alpha") {
+    copy.sort((a, b) => a.title.localeCompare(b.title, "fr", { sensitivity: "base" }));
+  } else if (state.sort === "recent") {
+    copy.sort((a, b) => b.addedAt - a.addedAt);
+  } else {
+    // "serie" : par série (alpha), puis par tome (numérique), puis par titre
+    copy.sort((a, b) => {
+      const sa = (a.series || a.title).toLowerCase();
+      const sb = (b.series || b.title).toLowerCase();
+      if (sa !== sb) return sa.localeCompare(sb, "fr", { sensitivity: "base" });
+      const va = a.volume ?? Infinity;
+      const vb = b.volume ?? Infinity;
+      if (va !== vb) return va - vb;
+      return a.title.localeCompare(b.title, "fr", { sensitivity: "base" });
+    });
+  }
+  return copy;
+}
+
 function renderLibrary() {
   const grid = $("#library");
   let list = state.books;
@@ -159,19 +211,37 @@ function renderLibrary() {
       (b) =>
         b.title.toLowerCase().includes(state.search) ||
         (b.author || "").toLowerCase().includes(state.search) ||
+        (b.series || "").toLowerCase().includes(state.search) ||
         (b.tags || []).some((t) => t.toLowerCase().includes(state.search))
     );
+
+  list = sortBooks(list);
 
   $("#emptyState").style.display = list.length ? "none" : "flex";
   $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
 
-  grid.querySelectorAll(".book-card").forEach((n) => n.remove());
+  grid.querySelectorAll(".book-card, .group-header").forEach((n) => n.remove());
 
   const frag = document.createDocumentFragment();
+  let lastSeries = null;
   for (const book of list) {
+    if (state.sort === "serie") {
+      const seriesLabel = book.series || book.title;
+      if (seriesLabel !== lastSeries) {
+        const header = document.createElement("div");
+        header.className = "group-header";
+        header.textContent = seriesLabel;
+        frag.appendChild(header);
+        lastSeries = seriesLabel;
+      }
+    }
     const card = document.createElement("div");
     card.className = "book-card";
     const coverURL = book.coverBlob ? URL.createObjectURL(book.coverBlob) : null;
+    const metaBits = [];
+    if (book.volume != null) metaBits.push("T" + book.volume);
+    metaBits.push(book.shelf);
+    if (book.pageCount) metaBits.push(book.pageCount + " p.");
     card.innerHTML = `
       <div class="cover-wrap">
         ${
@@ -183,7 +253,7 @@ function renderLibrary() {
         <button class="edit-btn" title="Modifier" data-id="${book.id}">✎</button>
       </div>
       <div class="book-title">${escapeHTML(book.title)}</div>
-      <div class="book-meta">${escapeHTML(book.shelf)}${book.pageCount ? " · " + book.pageCount + " p." : ""}</div>
+      <div class="book-meta">${escapeHTML(metaBits.join(" · "))}</div>
     `;
     card.querySelector(".cover-wrap img, .cover-fallback")?.addEventListener("click", () => openReader(book));
     card.querySelector(".edit-btn").addEventListener("click", (e) => {
@@ -205,6 +275,8 @@ function escapeHTML(s) {
 function openEdit(book) {
   state.editingId = book.id;
   $("#editTitle").value = book.title;
+  $("#editSeries").value = book.series || "";
+  $("#editVolume").value = book.volume ?? "";
   $("#editAuthor").value = book.author || "";
   $("#editShelf").innerHTML = SHELVES.map(
     (s) => `<option value="${s}" ${s === book.shelf ? "selected" : ""}>${s}</option>`
@@ -220,6 +292,9 @@ async function saveEdit(e) {
   e.preventDefault();
   const book = await DB.getBook(state.editingId);
   book.title = $("#editTitle").value.trim() || book.title;
+  book.series = $("#editSeries").value.trim() || book.title;
+  const volRaw = $("#editVolume").value.trim();
+  book.volume = volRaw === "" ? null : parseInt(volRaw, 10);
   book.author = $("#editAuthor").value.trim();
   book.shelf = $("#editShelf").value;
   book.tags = $("#editTags")
