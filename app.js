@@ -5,14 +5,25 @@ if (window.pdfjsLib) {
 }
 
 const SHELVES = ["Manga", "Doujinshi", "Livre", "BD", "Autre"];
+const FAVORITES_KEY = "__favoris__";
+const PRIVATE_KEY = "__prive__";
+const PRIVATE_HASH_STORAGE_KEY = "biblio_private_hash";
+
+const FILTERS = [
+  { key: "Tous", label: "Tous" },
+  ...SHELVES.map((s) => ({ key: s, label: s })),
+  { key: FAVORITES_KEY, label: "★ Favoris" },
+  { key: PRIVATE_KEY, label: "🔒 Privé" },
+];
 
 let state = {
   books: [],
   filter: "Tous",
   search: "",
-  sort: "serie", // "serie" | "alpha" | "recent"
+  sort: "serie", // "serie" | "author" | "alpha" | "recent"
   currentReader: null,
-  currentSeriesName: null, // série actuellement ouverte dans la modale "pile"
+  currentSeriesName: null,
+  privateUnlocked: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -27,6 +38,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   buildShelfFilters();
   buildSortControls();
   bindUI();
+  setupSwipeNav();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(console.error);
   }
@@ -36,19 +48,21 @@ window.addEventListener("DOMContentLoaded", async () => {
 
 function buildShelfFilters() {
   const wrap = $("#shelfFilters");
-  const chips = ["Tous", ...SHELVES];
-  wrap.innerHTML = chips
-    .map((s) => `<button class="chip" data-shelf="${s}">${s}</button>`)
-    .join("");
+  wrap.innerHTML = FILTERS.map((f) => `<button class="chip" data-key="${f.key}">${f.label}</button>`).join("");
   wrap.querySelectorAll(".chip").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.filter = btn.dataset.shelf;
+    btn.addEventListener("click", async () => {
+      const key = btn.dataset.key;
+      if (key === PRIVATE_KEY) {
+        const ok = await ensurePrivateUnlocked();
+        if (!ok) return;
+      }
+      state.filter = key;
       wrap.querySelectorAll(".chip").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       renderLibrary();
     });
   });
-  wrap.querySelector('[data-shelf="Tous"]').classList.add("active");
+  wrap.querySelector('[data-key="Tous"]').classList.add("active");
 }
 
 function buildSortControls() {
@@ -107,6 +121,93 @@ function bindUI() {
   });
 }
 
+// ---------- Section privée (verrou par mot de passe, côté interface) ----------
+async function sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function openPasswordModal(mode) {
+  return new Promise((resolve) => {
+    const modal = $("#passwordModal");
+    const form = $("#passwordForm");
+    const title = $("#passwordTitle");
+    const desc = $("#passwordDesc");
+    const pw1 = $("#pw1");
+    const pw2Wrap = $("#pw2Wrap");
+    const pw2 = $("#pw2");
+    const errorEl = $("#passwordError");
+
+    errorEl.textContent = "";
+    pw1.value = "";
+    pw2.value = "";
+
+    if (mode === "create") {
+      title.textContent = "Créer un mot de passe";
+      desc.textContent =
+        "Cette section sera masquée du reste de la bibliothèque. Retiens bien ce mot de passe : il n'y a aucun moyen de le récupérer si tu l'oublies (rien n'est envoyé nulle part, tout reste sur cet appareil).";
+      pw2Wrap.style.display = "block";
+    } else {
+      title.textContent = "Section privée";
+      desc.textContent = "Entre ton mot de passe pour y accéder.";
+      pw2Wrap.style.display = "none";
+    }
+
+    modal.classList.add("open");
+    pw1.focus();
+
+    function cleanup() {
+      form.removeEventListener("submit", onSubmit);
+      cancelBtn.removeEventListener("click", onCancel);
+      modal.classList.remove("open");
+    }
+    async function onSubmit(e) {
+      e.preventDefault();
+      if (mode === "create") {
+        if (pw1.value.length < 4) {
+          errorEl.textContent = "4 caractères minimum.";
+          return;
+        }
+        if (pw1.value !== pw2.value) {
+          errorEl.textContent = "Les deux mots de passe ne correspondent pas.";
+          return;
+        }
+        const hash = await sha256Hex(pw1.value);
+        localStorage.setItem(PRIVATE_HASH_STORAGE_KEY, hash);
+        cleanup();
+        resolve(true);
+      } else {
+        const hash = await sha256Hex(pw1.value);
+        const stored = localStorage.getItem(PRIVATE_HASH_STORAGE_KEY);
+        if (hash === stored) {
+          cleanup();
+          resolve(true);
+        } else {
+          errorEl.textContent = "Mot de passe incorrect.";
+          pw1.value = "";
+          pw1.focus();
+        }
+      }
+    }
+    function onCancel() {
+      cleanup();
+      resolve(false);
+    }
+    const cancelBtn = $("#passwordCancel");
+    form.addEventListener("submit", onSubmit);
+    cancelBtn.addEventListener("click", onCancel);
+  });
+}
+
+async function ensurePrivateUnlocked() {
+  if (state.privateUnlocked) return true;
+  const hasPassword = !!localStorage.getItem(PRIVATE_HASH_STORAGE_KEY);
+  const ok = await openPasswordModal(hasPassword ? "unlock" : "create");
+  if (ok) state.privateUnlocked = true;
+  return ok;
+}
+
 // ---------- Ajout de fichiers ----------
 function normalizedName(name) {
   return name.trim().toLowerCase();
@@ -121,14 +222,12 @@ async function handleFiles(fileList) {
 
   $("#addBtn").disabled = true;
 
-  // ensemble des noms de fichiers déjà présents dans la bibliothèque, pour éviter les doublons
   const existing = await DB.getAllBooks();
   const knownNames = new Set(
     existing.filter((b) => b.originalFilename).map((b) => normalizedName(b.originalFilename))
   );
 
   const skipped = [];
-  let imported = 0;
   const totalToImport = (images.length ? 1 : 0) + others.length;
   let done = 0;
 
@@ -138,10 +237,8 @@ async function handleFiles(fileList) {
   updateProgress();
 
   try {
-    // les images sélectionnées ensemble = un seul livre (planches), pas de check doublon dessus
     if (images.length) {
-      await importOne(images, true, knownNames);
-      imported++;
+      await importOne(images, true);
       done++;
       updateProgress();
     }
@@ -153,11 +250,8 @@ async function handleFiles(fileList) {
         updateProgress();
         continue;
       }
-      const added = await importOne(file, false, knownNames);
-      if (added) {
-        imported++;
-        knownNames.add(key);
-      }
+      const added = await importOne(file, false);
+      if (added) knownNames.add(key);
       done++;
       updateProgress();
     }
@@ -215,6 +309,7 @@ async function importOne(fileOrFiles, isImageGroup) {
     pageCount: parsed.pageCount,
     addedAt: Date.now(),
     favorite: false,
+    private: false,
     coverBlob: parsed.coverBlob || null,
     fileBlob: parsed.fileBlob || null,
     pageBlobs: parsed.pageBlobs || null,
@@ -249,7 +344,6 @@ function sortBooks(list) {
       return va - vb;
     });
   } else {
-    // "serie" : par série (alpha), puis par tome (numérique), puis par titre
     copy.sort((a, b) => {
       const sa = (a.series || a.title).toLowerCase();
       const sb = (b.series || b.title).toLowerCase();
@@ -274,8 +368,17 @@ function groupBySeries(list) {
 }
 
 function getFilteredSortedList() {
-  let list = state.books;
-  if (state.filter !== "Tous") list = list.filter((b) => b.shelf === state.filter);
+  // les livres privés sont toujours exclus, sauf quand on consulte la section privée déverrouillée
+  let list = state.books.filter((b) => !b.private || (state.filter === PRIVATE_KEY && state.privateUnlocked));
+
+  if (state.filter === FAVORITES_KEY) {
+    list = list.filter((b) => b.favorite);
+  } else if (state.filter === PRIVATE_KEY) {
+    list = list.filter((b) => b.private);
+  } else if (state.filter !== "Tous") {
+    list = list.filter((b) => b.shelf === state.filter);
+  }
+
   if (state.search)
     list = list.filter(
       (b) =>
@@ -302,11 +405,8 @@ function renderLibrary() {
       list.length > 1 ? "s" : ""
     }`;
     for (const [seriesName, books] of groups) {
-      if (books.length > 1) {
-        frag.appendChild(createStackCardElement(seriesName, books));
-      } else {
-        frag.appendChild(createBookCardElement(books[0]));
-      }
+      if (books.length > 1) frag.appendChild(createStackCardElement(seriesName, books));
+      else frag.appendChild(createBookCardElement(books[0]));
     }
   } else if (state.sort === "author") {
     $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
@@ -324,9 +424,7 @@ function renderLibrary() {
     }
   } else {
     $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
-    for (const book of list) {
-      frag.appendChild(createBookCardElement(book));
-    }
+    for (const book of list) frag.appendChild(createBookCardElement(book));
   }
   grid.appendChild(frag);
 }
@@ -348,6 +446,7 @@ function createBookCardElement(book) {
       }
       <span class="format-badge">${book.format}</span>
       <button class="edit-btn" title="Modifier" data-id="${book.id}">✎</button>
+      <button class="fav-btn ${book.favorite ? "active" : ""}" title="Favori">${book.favorite ? "♥" : "♡"}</button>
     </div>
     <div class="book-title">${escapeHTML(book.title)}</div>
     <div class="book-meta">${escapeHTML(metaBits.join(" · "))}</div>
@@ -357,11 +456,19 @@ function createBookCardElement(book) {
     e.stopPropagation();
     openEdit(book);
   });
+  card.querySelector(".fav-btn").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    book.favorite = !book.favorite;
+    await DB.updateBook(book);
+    const btn = e.currentTarget;
+    btn.textContent = book.favorite ? "♥" : "♡";
+    btn.classList.toggle("active", book.favorite);
+    if (state.filter === FAVORITES_KEY) renderLibrary();
+  });
   return card;
 }
 
 function createStackCardElement(seriesName, books) {
-  // représentant de la pile : le tome le plus bas (ou le premier alphabétiquement)
   const sorted = [...books].sort((a, b) => (a.volume ?? Infinity) - (b.volume ?? Infinity));
   const rep = sorted[0];
   const card = document.createElement("div");
@@ -400,7 +507,7 @@ function renderSeriesView() {
   const seriesName = state.currentSeriesName;
   if (!seriesName) return;
   const books = state.books
-    .filter((b) => (b.series || b.title) === seriesName)
+    .filter((b) => (!b.private || state.filter === PRIVATE_KEY) && (b.series || b.title) === seriesName)
     .sort((a, b) => (a.volume ?? Infinity) - (b.volume ?? Infinity) || a.title.localeCompare(b.title, "fr"));
 
   $("#seriesTitle").textContent = seriesName;
@@ -408,9 +515,7 @@ function renderSeriesView() {
   const grid = $("#seriesGrid");
   grid.innerHTML = "";
   const frag = document.createDocumentFragment();
-  for (const book of books) {
-    frag.appendChild(createBookCardElement(book));
-  }
+  for (const book of books) frag.appendChild(createBookCardElement(book));
   grid.appendChild(frag);
 }
 
@@ -430,6 +535,7 @@ function openEdit(book) {
     (s) => `<option value="${s}" ${s === book.shelf ? "selected" : ""}>${s}</option>`
   ).join("");
   $("#editTags").value = (book.tags || []).join(", ");
+  $("#editPrivate").checked = !!book.private;
   $("#editModal").classList.add("open");
 }
 function closeEdit() {
@@ -449,6 +555,7 @@ async function saveEdit(e) {
     .value.split(",")
     .map((t) => t.trim())
     .filter(Boolean);
+  book.private = $("#editPrivate").checked;
   await DB.updateBook(book);
   closeEdit();
   await refreshLibrary();
@@ -465,7 +572,7 @@ async function deleteFromEdit() {
 
 // ---------- Lecteur ----------
 async function openReader(book) {
-  state.currentReader = { book, page: 0 };
+  state.currentReader = { book, page: 0, zoomScale: 1 };
   $("#readerModal").classList.add("open");
   $("#readerTitle").textContent = book.title;
   const viewer = $("#readerViewer");
@@ -525,13 +632,20 @@ async function renderPDFPage(i) {
   const { pdf } = state.currentReader;
   state.currentReader.page = i;
   const page = await pdf.getPage(i + 1);
-  const viewport = page.getViewport({ scale: Math.min(2, (window.innerWidth * 0.9) / page.getViewport({ scale: 1 }).width) });
+  const dpr = Math.min(2.5, window.devicePixelRatio || 1);
+  const baseWidth = page.getViewport({ scale: 1 }).width;
+  const targetScale = Math.min(3, (window.innerWidth * 0.97 * dpr) / baseWidth);
+  const viewport = page.getViewport({ scale: targetScale });
   const canvas = document.createElement("canvas");
   canvas.width = viewport.width;
   canvas.height = viewport.height;
+  canvas.style.width = "100%";
+  canvas.style.height = "auto";
   await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
   $("#readerViewer").innerHTML = "";
   $("#readerViewer").appendChild(canvas);
+  state.currentReader.zoomScale = 1;
+  enableZoomPan(canvas, (s) => (state.currentReader.zoomScale = s));
   updatePageLabel();
 }
 
@@ -539,6 +653,8 @@ function renderImagePage(i) {
   state.currentReader.page = i;
   const url = state.currentReader.pages[i];
   $("#readerViewer").innerHTML = `<img src="${url}" class="page-img" alt="page ${i + 1}">`;
+  state.currentReader.zoomScale = 1;
+  enableZoomPan($("#readerViewer .page-img"), (s) => (state.currentReader.zoomScale = s));
   updatePageLabel();
 }
 
@@ -570,6 +686,119 @@ function closeReader() {
   $("#readerModal").classList.remove("open");
   $("#readerViewer").innerHTML = "";
   state.currentReader = null;
+}
+
+// ---------- Glisser pour tourner les pages ----------
+function setupSwipeNav() {
+  const viewer = $("#readerViewer");
+  let sx = 0,
+    sy = 0,
+    st = 0;
+  viewer.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) return;
+      sx = e.touches[0].clientX;
+      sy = e.touches[0].clientY;
+      st = Date.now();
+    },
+    { passive: true }
+  );
+  viewer.addEventListener("touchend", (e) => {
+    if (!state.currentReader) return;
+    if (state.currentReader.zoomScale > 1.05) return; // en train de zoomer/déplacer, pas de swipe de page
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - sx;
+    const dy = touch.clientY - sy;
+    const dt = Date.now() - st;
+    if (dt < 600 && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      goPage(dx < 0 ? 1 : -1);
+    }
+  });
+}
+
+// ---------- Zoom / pan (pincer pour zoomer, double-tap, glisser une fois zoomé) ----------
+function enableZoomPan(el, onScaleChange) {
+  if (!el) return;
+  let scale = 1,
+    translateX = 0,
+    translateY = 0;
+  let lastTapTime = 0;
+  let startDist = 0,
+    startScale = 1;
+  let dragging = false,
+    startX = 0,
+    startY = 0,
+    startTX = 0,
+    startTY = 0;
+
+  el.style.transformOrigin = "center center";
+  el.style.transition = "transform 0.15s ease-out";
+  el.style.touchAction = "none";
+
+  function applyTransform() {
+    el.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+    onScaleChange && onScaleChange(scale);
+  }
+  function resetZoom() {
+    scale = 1;
+    translateX = 0;
+    translateY = 0;
+    applyTransform();
+  }
+
+  el.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length === 2) {
+        const [a, b] = e.touches;
+        startDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+        startScale = scale;
+      } else if (e.touches.length === 1) {
+        const now = Date.now();
+        if (now - lastTapTime < 300) {
+          scale = scale > 1 ? 1 : 2.5;
+          translateX = 0;
+          translateY = 0;
+          applyTransform();
+        }
+        lastTapTime = now;
+        if (scale > 1) {
+          dragging = true;
+          startX = e.touches[0].clientX;
+          startY = e.touches[0].clientY;
+          startTX = translateX;
+          startTY = translateY;
+        }
+      }
+    },
+    { passive: true }
+  );
+
+  el.addEventListener(
+    "touchmove",
+    (e) => {
+      if (e.touches.length === 2 && startDist) {
+        const [a, b] = e.touches;
+        const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+        scale = Math.min(4, Math.max(1, startScale * (dist / startDist)));
+        applyTransform();
+      } else if (dragging && e.touches.length === 1) {
+        translateX = startTX + (e.touches[0].clientX - startX);
+        translateY = startTY + (e.touches[0].clientY - startY);
+        applyTransform();
+      }
+    },
+    { passive: true }
+  );
+
+  el.addEventListener("touchend", (e) => {
+    if (e.touches.length === 0) {
+      dragging = false;
+      startDist = 0;
+      if (scale <= 1.02) resetZoom();
+    }
+  });
 }
 
 // ---------- Stockage ----------
