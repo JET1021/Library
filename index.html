@@ -79,6 +79,10 @@
       <select id="editShelf"></select>
       <label for="editTags">Tags (séparés par des virgules)</label>
       <input id="editTags" placeholder="ex: seinen, romance, tome 3">
+      <label class="checkbox-row">
+        <input type="checkbox" id="editPrivate">
+        <span>Section privée (masqué, protégé par mot de passe)</span>
+      </label>
       <div class="modal-actions">
         <button type="button" class="btn-danger" id="deleteBookBtn">Supprimer</button>
         <button type="submit" class="btn-primary">Enregistrer</button>
@@ -98,6 +102,29 @@
       <button class="icon-btn" id="closeSeries">✕</button>
     </div>
     <div id="seriesGrid" class="series-grid"></div>
+  </div>
+</div>
+
+<!-- Mot de passe section privée -->
+<div class="modal" id="passwordModal">
+  <div class="modal-panel">
+    <div class="modal-head">
+      <h2 id="passwordTitle">Section privée</h2>
+    </div>
+    <p id="passwordDesc" class="password-desc"></p>
+    <form id="passwordForm">
+      <label for="pw1">Mot de passe</label>
+      <input id="pw1" type="password" autocomplete="off" required>
+      <div id="pw2Wrap">
+        <label for="pw2">Confirme le mot de passe</label>
+        <input id="pw2" type="password" autocomplete="off">
+      </div>
+      <p id="passwordError" class="password-error"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-danger" id="passwordCancel">Annuler</button>
+        <button type="submit" class="btn-primary">Valider</button>
+      </div>
+    </form>
   </div>
 </div>
 
