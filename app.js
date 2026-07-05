@@ -625,6 +625,7 @@ async function openReader(book) {
     state.currentReader.total = pdf.numPages;
     await renderPDFPage(0);
     setupPageNav();
+    enableWebtoonToggle();
     return;
   }
 
@@ -686,12 +687,75 @@ function toggleReaderMode() {
   }
 }
 
+function toggleReaderMode() {
+  const r = state.currentReader;
+  if (!r) return;
+  r.mode = r.mode === "scroll" ? "page" : "scroll";
+  const modeBtn = $("#readerModeBtn");
+  const viewer = $("#readerViewer");
+  if (r.mode === "scroll") {
+    modeBtn.textContent = "▤";
+    modeBtn.title = "Repasser en page par page";
+    viewer.classList.add("scroll-mode");
+    $("#readerNav").style.display = "none";
+    if (r.book.format === "pdf") renderScrollModePDF();
+    else renderScrollMode();
+  } else {
+    modeBtn.textContent = "↕";
+    modeBtn.title = "Passer en défilement continu (Webtoon)";
+    viewer.classList.remove("scroll-mode");
+    $("#readerNav").style.display = "flex";
+    if (r.book.format === "pdf") renderPDFPage(r.page);
+    else renderImagePage(r.page);
+  }
+}
+
 function renderScrollMode() {
   const { pages } = state.currentReader;
   const viewer = $("#readerViewer");
   viewer.innerHTML = pages
     .map((url, i) => `<img src="${url}" class="scroll-page" data-i="${i}" alt="page ${i + 1}">`)
     .join("");
+}
+
+async function renderScrollModePDF() {
+  const { pdf, total } = state.currentReader;
+  const viewer = $("#readerViewer");
+  viewer.innerHTML = `<p class="reader-loading">Chargement des pages… (0/${total})</p>`;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const loadingLabel = viewer.querySelector(".reader-loading");
+
+  for (let i = 1; i <= total; i++) {
+    // si l'utilisateur repasse en mode page pendant le chargement, on arrête
+    if (state.currentReader?.mode !== "scroll") return;
+    const page = await pdf.getPage(i);
+    const baseWidth = page.getViewport({ scale: 1 }).width;
+    const targetScale = Math.min(2.2, (window.innerWidth * 0.97 * dpr) / baseWidth);
+    const viewport = page.getViewport({ scale: targetScale });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    canvas.className = "scroll-page";
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    if (loadingLabel && loadingLabel.isConnected) {
+      viewer.innerHTML = "";
+    }
+    viewer.appendChild(canvas);
+    if (i < total) {
+      // petit indicateur de progression tant que tout n'est pas chargé
+      let progress = viewer.querySelector(".reader-progress");
+      if (!progress) {
+        progress = document.createElement("p");
+        progress.className = "reader-progress";
+        viewer.appendChild(progress);
+      } else {
+        viewer.appendChild(progress); // remonte l'indicateur en bas de la liste
+      }
+      progress.textContent = `Chargement… (${i}/${total})`;
+    } else {
+      viewer.querySelector(".reader-progress")?.remove();
+    }
+  }
 }
 
 async function renderPDFPage(i) {
