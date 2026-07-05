@@ -56,8 +56,8 @@ function parseSeriesAndVolume(filename) {
 }
 
 // ---------- PDF ----------
-async function parsePDF(file) {
-  const buf = await file.arrayBuffer();
+async function parsePDFFromBlob(blob) {
+  const buf = await blob.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
   const page = await pdf.getPage(1);
   const viewport = page.getViewport({ scale: 0.6 });
@@ -70,24 +70,42 @@ async function parsePDF(file) {
     format: "pdf",
     coverBlob,
     pageCount: pdf.numPages,
-    fileBlob: file,
+    fileBlob: blob,
   };
 }
+async function parsePDF(file) {
+  return parsePDFFromBlob(file);
+}
 
-// ---------- CBZ (zip d'images) ----------
+// ---------- CBZ (zip d'images), avec repli "lot de PDF" si aucune image trouvée ----------
 async function parseCBZ(file) {
   const zip = await JSZip.loadAsync(file);
-  const entries = Object.values(zip.files)
-    .filter((f) => !f.dir && IMAGE_EXT.includes(extOf(f.name)))
+  const allEntries = Object.values(zip.files).filter((f) => !f.dir);
+
+  const imageEntries = allEntries
+    .filter((f) => IMAGE_EXT.includes(extOf(f.name)))
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  if (entries.length === 0) throw new Error("Aucune image trouvée dans le CBZ");
-  const coverBlob = await entries[0].async("blob");
-  return {
-    format: "cbz",
-    coverBlob,
-    pageCount: entries.length,
-    fileBlob: file,
-  };
+
+  if (imageEntries.length > 0) {
+    const coverBlob = await imageEntries[0].async("blob");
+    return {
+      format: "cbz",
+      coverBlob,
+      pageCount: imageEntries.length,
+      fileBlob: file,
+    };
+  }
+
+  // pas d'image directe : ce zip contient peut-être plusieurs épisodes en PDF
+  const pdfEntries = allEntries
+    .filter((f) => extOf(f.name) === "pdf")
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  if (pdfEntries.length > 0) {
+    return { format: "bundle-pdf", entries: pdfEntries };
+  }
+
+  throw new Error("Aucune image ni PDF trouvé dans cette archive.");
 }
 
 // ---------- EPUB ----------
