@@ -760,19 +760,33 @@ async function renderScrollModePDF() {
   const { pdf, total } = state.currentReader;
   const viewer = $("#readerViewer");
   viewer.innerHTML = `<p class="reader-loading">Chargement des pages… (0/${total})</p>`;
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
   const loadingLabel = viewer.querySelector(".reader-loading");
+  const MAX_DIM = 4096;
+  const MAX_AREA = 16000000;
 
   for (let i = 1; i <= total; i++) {
     // si l'utilisateur repasse en mode page pendant le chargement, on arrête
     if (state.currentReader?.mode !== "scroll") return;
     const page = await pdf.getPage(i);
-    const baseWidth = page.getViewport({ scale: 1 }).width;
-    const targetScale = Math.min(2.2, (window.innerWidth * 0.97 * dpr) / baseWidth);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const baseWidth = baseViewport.width;
+    const baseHeight = baseViewport.height;
+    let targetScale = Math.min(2.2, (window.innerWidth * 0.97 * dpr) / baseWidth);
+    let outW = baseWidth * targetScale;
+    let outH = baseHeight * targetScale;
+    if (outW > MAX_DIM) targetScale = MAX_DIM / baseWidth;
+    outH = baseHeight * targetScale;
+    if (outH > MAX_DIM) targetScale = MAX_DIM / baseHeight;
+    outW = baseWidth * targetScale;
+    outH = baseHeight * targetScale;
+    if (outW * outH > MAX_AREA) {
+      targetScale *= Math.sqrt(MAX_AREA / (outW * outH));
+    }
     const viewport = page.getViewport({ scale: targetScale });
     const canvas = document.createElement("canvas");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    canvas.width = Math.round(viewport.width);
+    canvas.height = Math.round(viewport.height);
     canvas.className = "scroll-page";
     await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
     if (loadingLabel && loadingLabel.isConnected) {
@@ -780,14 +794,13 @@ async function renderScrollModePDF() {
     }
     viewer.appendChild(canvas);
     if (i < total) {
-      // petit indicateur de progression tant que tout n'est pas chargé
       let progress = viewer.querySelector(".reader-progress");
       if (!progress) {
         progress = document.createElement("p");
         progress.className = "reader-progress";
         viewer.appendChild(progress);
       } else {
-        viewer.appendChild(progress); // remonte l'indicateur en bas de la liste
+        viewer.appendChild(progress);
       }
       progress.textContent = `Chargement… (${i}/${total})`;
     } else {
@@ -800,13 +813,33 @@ async function renderPDFPage(i) {
   const { pdf } = state.currentReader;
   state.currentReader.page = i;
   const page = await pdf.getPage(i + 1);
-  const dpr = Math.min(2.5, window.devicePixelRatio || 1);
-  const baseWidth = page.getViewport({ scale: 1 }).width;
-  const targetScale = Math.min(3, (window.innerWidth * 0.97 * dpr) / baseWidth);
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const baseWidth = baseViewport.width;
+  const baseHeight = baseViewport.height;
+
+  let targetScale = Math.min(4, (window.innerWidth * 0.97 * dpr) / baseWidth);
+
+  // Sécurité mémoire : certains PDF de webtoon/toomics n'ont qu'une seule page
+  // géante et très haute (tout l'épisode d'un coup). Sans cette limite, le canvas
+  // dépasse ce que Safari peut gérer et le rendu plante, surtout en zoomant.
+  const MAX_DIM = 4096;
+  const MAX_AREA = 16000000;
+  let outW = baseWidth * targetScale;
+  let outH = baseHeight * targetScale;
+  if (outW > MAX_DIM) targetScale = MAX_DIM / baseWidth;
+  outH = baseHeight * targetScale;
+  if (outH > MAX_DIM) targetScale = MAX_DIM / baseHeight;
+  outW = baseWidth * targetScale;
+  outH = baseHeight * targetScale;
+  if (outW * outH > MAX_AREA) {
+    targetScale *= Math.sqrt(MAX_AREA / (outW * outH));
+  }
+
   const viewport = page.getViewport({ scale: targetScale });
   const canvas = document.createElement("canvas");
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
   canvas.style.width = "100%";
   canvas.style.height = "auto";
   await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
