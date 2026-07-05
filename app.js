@@ -228,6 +228,7 @@ async function handleFiles(fileList) {
   );
 
   const skipped = [];
+  let importedCount = 0;
   const totalToImport = (images.length ? 1 : 0) + others.length;
   let done = 0;
 
@@ -238,7 +239,8 @@ async function handleFiles(fileList) {
 
   try {
     if (images.length) {
-      await importOne(images, true);
+      await importSingle(images, true, knownNames, skipped);
+      importedCount++;
       done++;
       updateProgress();
     }
@@ -250,8 +252,8 @@ async function handleFiles(fileList) {
         updateProgress();
         continue;
       }
-      const added = await importOne(file, false);
-      if (added) knownNames.add(key);
+      const added = await importSingle(file, false, knownNames, skipped);
+      importedCount += added;
       done++;
       updateProgress();
     }
@@ -275,26 +277,62 @@ async function handleFiles(fileList) {
   }
 }
 
-async function importOne(fileOrFiles, isImageGroup) {
-  let parsed;
-  let titleGuess;
-  let seriesGuess = "";
-  let volumeGuess = null;
-  let originalFilename = null;
+// Importe un fichier sélectionné (ou un groupe d'images). Peut ajouter plusieurs
+// livres d'un coup si c'est une archive contenant plusieurs PDF (plusieurs épisodes).
+// Retourne le nombre de livres effectivement ajoutés.
+async function importSingle(fileOrFiles, isImageGroup, knownNames, skipped) {
   if (isImageGroup) {
-    parsed = await parseImageSet(fileOrFiles);
-    titleGuess = "Planches importées";
-    seriesGuess = titleGuess;
-  } else {
-    parsed = await parseFile(fileOrFiles);
-    titleGuess = fileOrFiles.name.replace(/\.[^/.]+$/, "");
-    const guess = parseSeriesAndVolume(fileOrFiles.name);
-    seriesGuess = guess.series || titleGuess;
-    volumeGuess = guess.volume;
-    originalFilename = fileOrFiles.name;
+    const parsed = await parseImageSet(fileOrFiles);
+    await createAndStoreBook({
+      titleGuess: "Planches importées",
+      seriesGuess: "Planches importées",
+      volumeGuess: null,
+      originalFilename: null,
+      parsed,
+    });
+    return 1;
   }
-  if (!parsed) return null;
 
+  const parsed = await parseFile(fileOrFiles);
+
+  if (parsed.format === "bundle-pdf") {
+    let added = 0;
+    for (const entry of parsed.entries) {
+      const innerName = entry.name.split("/").pop();
+      const key = normalizedName(innerName);
+      if (knownNames.has(key)) {
+        skipped.push(innerName);
+        continue;
+      }
+      const blob = await entry.async("blob");
+      const innerParsed = await parsePDFFromBlob(blob);
+      const guess = parseSeriesAndVolume(innerName);
+      await createAndStoreBook({
+        titleGuess: innerName.replace(/\.[^/.]+$/, ""),
+        seriesGuess: guess.series || innerName,
+        volumeGuess: guess.volume,
+        originalFilename: innerName,
+        parsed: innerParsed,
+      });
+      knownNames.add(key);
+      added++;
+    }
+    return added;
+  }
+
+  const titleGuess = fileOrFiles.name.replace(/\.[^/.]+$/, "");
+  const guess = parseSeriesAndVolume(fileOrFiles.name);
+  await createAndStoreBook({
+    titleGuess,
+    seriesGuess: guess.series || titleGuess,
+    volumeGuess: guess.volume,
+    originalFilename: fileOrFiles.name,
+    parsed,
+  });
+  return 1;
+}
+
+async function createAndStoreBook({ titleGuess, seriesGuess, volumeGuess, originalFilename, parsed }) {
   const id = uid();
   const book = {
     id,
