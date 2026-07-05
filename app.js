@@ -5,6 +5,7 @@ if (window.pdfjsLib) {
 }
 
 const SHELVES = ["Manga", "Doujinshi", "Livre", "BD", "Autre"];
+const SHELF_ICONS = { Manga: "📖", Doujinshi: "🌙", Livre: "📚", BD: "💥", Autre: "🗂️" };
 const FAVORITES_KEY = "__favoris__";
 const PRIVATE_KEY = "__prive__";
 const PRIVATE_HASH_STORAGE_KEY = "biblio_private_hash";
@@ -102,7 +103,6 @@ function bindUI() {
   $("#deleteBookBtn").addEventListener("click", deleteFromEdit);
   $("#closeSeries").addEventListener("click", closeSeriesView);
 
-  // drag & drop sur toute la zone bibliothèque
   const drop = $("#library");
   ["dragover", "dragenter"].forEach((ev) =>
     drop.addEventListener(ev, (e) => {
@@ -368,7 +368,6 @@ function groupBySeries(list) {
 }
 
 function getFilteredSortedList() {
-  // les livres privés sont toujours exclus, sauf quand on consulte la section privée déverrouillée
   let list = state.books.filter((b) => !b.private || (state.filter === PRIVATE_KEY && state.privateUnlocked));
 
   if (state.filter === FAVORITES_KEY) {
@@ -390,26 +389,17 @@ function getFilteredSortedList() {
   return sortBooks(list);
 }
 
-function renderLibrary() {
-  const grid = $("#library");
-  const list = getFilteredSortedList();
-
-  $("#emptyState").style.display = list.length ? "none" : "flex";
-
-  grid.querySelectorAll(".book-card, .group-header").forEach((n) => n.remove());
-  const frag = document.createDocumentFragment();
-
+// Ajoute au fragment le rendu (piles / auteur / plat) d'une liste déjà triée,
+// selon le mode de tri actif. Réutilisé à la fois pour une catégorie unique
+// et pour chaque section de catégorie dans la vue "Tous".
+function renderBooksInto(frag, list) {
   if (state.sort === "serie") {
     const groups = groupBySeries(list);
-    $("#count").textContent = `${groups.size} série${groups.size > 1 ? "s" : ""} · ${list.length} ouvrage${
-      list.length > 1 ? "s" : ""
-    }`;
     for (const [seriesName, books] of groups) {
       if (books.length > 1) frag.appendChild(createStackCardElement(seriesName, books));
       else frag.appendChild(createBookCardElement(books[0]));
     }
   } else if (state.sort === "author") {
-    $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
     let lastAuthor = null;
     for (const book of list) {
       const authorLabel = book.author || "Auteur inconnu";
@@ -423,8 +413,42 @@ function renderLibrary() {
       frag.appendChild(createBookCardElement(book));
     }
   } else {
-    $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
     for (const book of list) frag.appendChild(createBookCardElement(book));
+  }
+}
+
+function renderLibrary() {
+  const grid = $("#library");
+  const list = getFilteredSortedList();
+
+  $("#emptyState").style.display = list.length ? "none" : "flex";
+  $("#count").textContent = `${list.length} ouvrage${list.length > 1 ? "s" : ""}`;
+
+  grid.querySelectorAll(".book-card, .group-header, .category-header").forEach((n) => n.remove());
+  const frag = document.createDocumentFragment();
+
+  if (state.filter === "Tous") {
+    // vue "Tous" : une section bien distincte par catégorie, pour une lecture plus claire
+    for (const shelf of SHELVES) {
+      const shelfBooks = list.filter((b) => b.shelf === shelf);
+      if (!shelfBooks.length) continue;
+      const header = document.createElement("div");
+      header.className = "category-header";
+      header.innerHTML = `<span>${SHELF_ICONS[shelf] || "📁"} ${escapeHTML(shelf)}</span><span class="category-count">${shelfBooks.length}</span>`;
+      frag.appendChild(header);
+      renderBooksInto(frag, shelfBooks);
+    }
+    // livres dont l'étagère ne correspond à aucune catégorie connue (sécurité)
+    const others = list.filter((b) => !SHELVES.includes(b.shelf));
+    if (others.length) {
+      const header = document.createElement("div");
+      header.className = "category-header";
+      header.innerHTML = `<span>🗂️ Autre</span><span class="category-count">${others.length}</span>`;
+      frag.appendChild(header);
+      renderBooksInto(frag, others);
+    }
+  } else {
+    renderBooksInto(frag, list);
   }
   grid.appendChild(frag);
 }
@@ -572,9 +596,12 @@ async function deleteFromEdit() {
 
 // ---------- Lecteur ----------
 async function openReader(book) {
-  state.currentReader = { book, page: 0, zoomScale: 1 };
+  state.currentReader = { book, page: 0, zoomScale: 1, mode: "page" };
   $("#readerModal").classList.add("open");
   $("#readerTitle").textContent = book.title;
+  $("#readerViewer").classList.remove("scroll-mode");
+  const modeBtn = $("#readerModeBtn");
+  modeBtn.style.display = "none";
   const viewer = $("#readerViewer");
   viewer.innerHTML = `<p class="reader-loading">Chargement…</p>`;
 
@@ -615,6 +642,7 @@ async function openReader(book) {
     state.currentReader.total = urls.length;
     renderImagePage(0);
     setupPageNav();
+    enableWebtoonToggle();
     return;
   }
 
@@ -624,8 +652,46 @@ async function openReader(book) {
     state.currentReader.total = urls.length;
     renderImagePage(0);
     setupPageNav();
+    enableWebtoonToggle();
     return;
   }
+}
+
+function enableWebtoonToggle() {
+  const modeBtn = $("#readerModeBtn");
+  modeBtn.style.display = "inline-flex";
+  modeBtn.textContent = "↕";
+  modeBtn.title = "Passer en défilement continu (Webtoon)";
+  modeBtn.onclick = toggleReaderMode;
+}
+
+function toggleReaderMode() {
+  const r = state.currentReader;
+  if (!r) return;
+  r.mode = r.mode === "scroll" ? "page" : "scroll";
+  const modeBtn = $("#readerModeBtn");
+  const viewer = $("#readerViewer");
+  if (r.mode === "scroll") {
+    modeBtn.textContent = "▤";
+    modeBtn.title = "Repasser en page par page";
+    viewer.classList.add("scroll-mode");
+    renderScrollMode();
+    $("#readerNav").style.display = "none";
+  } else {
+    modeBtn.textContent = "↕";
+    modeBtn.title = "Passer en défilement continu (Webtoon)";
+    viewer.classList.remove("scroll-mode");
+    $("#readerNav").style.display = "flex";
+    renderImagePage(r.page);
+  }
+}
+
+function renderScrollMode() {
+  const { pages } = state.currentReader;
+  const viewer = $("#readerViewer");
+  viewer.innerHTML = pages
+    .map((url, i) => `<img src="${url}" class="scroll-page" data-i="${i}" alt="page ${i + 1}">`)
+    .join("");
 }
 
 async function renderPDFPage(i) {
@@ -665,6 +731,7 @@ function updatePageLabel() {
 }
 
 function setupPageNav() {
+  $("#readerNav").style.display = "flex";
   $("#readerNav").innerHTML = `
     <button id="prevPage">‹</button>
     <span id="pageLabel"></span>
@@ -685,6 +752,8 @@ function goPage(delta) {
 function closeReader() {
   $("#readerModal").classList.remove("open");
   $("#readerViewer").innerHTML = "";
+  $("#readerViewer").classList.remove("scroll-mode");
+  $("#readerModeBtn").style.display = "none";
   state.currentReader = null;
 }
 
@@ -706,7 +775,8 @@ function setupSwipeNav() {
   );
   viewer.addEventListener("touchend", (e) => {
     if (!state.currentReader) return;
-    if (state.currentReader.zoomScale > 1.05) return; // en train de zoomer/déplacer, pas de swipe de page
+    if (state.currentReader.mode === "scroll") return; // le scroll vertical gère lui-même la navigation
+    if (state.currentReader.zoomScale > 1.05) return;
     const touch = e.changedTouches[0];
     const dx = touch.clientX - sx;
     const dy = touch.clientY - sy;
