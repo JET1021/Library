@@ -714,27 +714,6 @@ function toggleReaderMode() {
     modeBtn.textContent = "▤";
     modeBtn.title = "Repasser en page par page";
     viewer.classList.add("scroll-mode");
-    renderScrollMode();
-    $("#readerNav").style.display = "none";
-  } else {
-    modeBtn.textContent = "↕";
-    modeBtn.title = "Passer en défilement continu (Webtoon)";
-    viewer.classList.remove("scroll-mode");
-    $("#readerNav").style.display = "flex";
-    renderImagePage(r.page);
-  }
-}
-
-function toggleReaderMode() {
-  const r = state.currentReader;
-  if (!r) return;
-  r.mode = r.mode === "scroll" ? "page" : "scroll";
-  const modeBtn = $("#readerModeBtn");
-  const viewer = $("#readerViewer");
-  if (r.mode === "scroll") {
-    modeBtn.textContent = "▤";
-    modeBtn.title = "Repasser en page par page";
-    viewer.classList.add("scroll-mode");
     $("#readerNav").style.display = "none";
     if (r.book.format === "pdf") renderScrollModePDF();
     else renderScrollMode();
@@ -756,57 +735,75 @@ function renderScrollMode() {
     .join("");
 }
 
+// Rend UNE page PDF dans `container`, en la découpant automatiquement en
+// plusieurs tranches (canvas) si elle est trop haute pour être dessinée d'un
+// coup en toute sécurité (cas fréquent des PDF webtoon/toomics : tout un
+// chapitre empilé sur une seule page géante). Chaque tranche reste nette,
+// sans jamais dépasser une taille de canvas qui ferait planter Safari.
+async function renderPDFPageTiles(page, container, dpr) {
+  const baseViewport = page.getViewport({ scale: 1 });
+  const baseWidth = baseViewport.width;
+  const fitScale = (window.innerWidth * 0.97 * dpr) / baseWidth;
+  const scale = Math.min(4, fitScale);
+  const viewport = page.getViewport({ scale });
+  const fullW = Math.round(viewport.width);
+  const fullH = Math.round(viewport.height);
+  const MAX_TILE_H = 3000; // hauteur de tranche sûre sur tous les appareils
+
+  if (fullH <= MAX_TILE_H) {
+    const canvas = document.createElement("canvas");
+    canvas.width = fullW;
+    canvas.height = fullH;
+    canvas.className = "pdf-tile";
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    container.appendChild(canvas);
+    return;
+  }
+
+  const numSlices = Math.ceil(fullH / MAX_TILE_H);
+  for (let k = 0; k < numSlices; k++) {
+    const sliceH = Math.min(MAX_TILE_H, fullH - k * MAX_TILE_H);
+    const canvas = document.createElement("canvas");
+    canvas.width = fullW;
+    canvas.height = sliceH;
+    canvas.className = "pdf-tile";
+    const ctx = canvas.getContext("2d");
+    ctx.translate(0, -k * MAX_TILE_H);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    container.appendChild(canvas);
+  }
+}
+
 async function renderScrollModePDF() {
   const { pdf, total } = state.currentReader;
   const viewer = $("#readerViewer");
   viewer.innerHTML = `<p class="reader-loading">Chargement des pages… (0/${total})</p>`;
   const dpr = Math.min(3, window.devicePixelRatio || 1);
-  const loadingLabel = viewer.querySelector(".reader-loading");
-  const MAX_DIM = 4096;
-  const MAX_AREA = 16000000;
+  const container = document.createElement("div");
+  container.className = "pdf-page-container";
 
   for (let i = 1; i <= total; i++) {
-    // si l'utilisateur repasse en mode page pendant le chargement, on arrête
     if (state.currentReader?.mode !== "scroll") return;
     const page = await pdf.getPage(i);
-    const baseViewport = page.getViewport({ scale: 1 });
-    const baseWidth = baseViewport.width;
-    const baseHeight = baseViewport.height;
-    let targetScale = Math.min(2.2, (window.innerWidth * 0.97 * dpr) / baseWidth);
-    let outW = baseWidth * targetScale;
-    let outH = baseHeight * targetScale;
-    if (outW > MAX_DIM) targetScale = MAX_DIM / baseWidth;
-    outH = baseHeight * targetScale;
-    if (outH > MAX_DIM) targetScale = MAX_DIM / baseHeight;
-    outW = baseWidth * targetScale;
-    outH = baseHeight * targetScale;
-    if (outW * outH > MAX_AREA) {
-      targetScale *= Math.sqrt(MAX_AREA / (outW * outH));
-    }
-    const viewport = page.getViewport({ scale: targetScale });
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(viewport.width);
-    canvas.height = Math.round(viewport.height);
-    canvas.className = "scroll-page";
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-    if (loadingLabel && loadingLabel.isConnected) {
+    await renderPDFPageTiles(page, container, dpr);
+    if (i === 1) {
       viewer.innerHTML = "";
+      viewer.appendChild(container);
     }
-    viewer.appendChild(canvas);
     if (i < total) {
       let progress = viewer.querySelector(".reader-progress");
       if (!progress) {
         progress = document.createElement("p");
         progress.className = "reader-progress";
-        viewer.appendChild(progress);
-      } else {
-        viewer.appendChild(progress);
       }
+      viewer.appendChild(progress);
       progress.textContent = `Chargement… (${i}/${total})`;
     } else {
       viewer.querySelector(".reader-progress")?.remove();
     }
   }
+  state.currentReader.zoomScale = 1;
+  enableZoomPan(container, (s) => (state.currentReader.zoomScale = s));
 }
 
 async function renderPDFPage(i) {
@@ -814,39 +811,18 @@ async function renderPDFPage(i) {
   state.currentReader.page = i;
   const page = await pdf.getPage(i + 1);
   const dpr = Math.min(3, window.devicePixelRatio || 1);
-  const baseViewport = page.getViewport({ scale: 1 });
-  const baseWidth = baseViewport.width;
-  const baseHeight = baseViewport.height;
 
-  let targetScale = Math.min(4, (window.innerWidth * 0.97 * dpr) / baseWidth);
+  const viewer = $("#readerViewer");
+  viewer.innerHTML = "";
+  viewer.classList.add("scroll-mode"); // affichage en haut + défilement, adapté aux pages très hautes
+  const container = document.createElement("div");
+  container.className = "pdf-page-container";
+  viewer.appendChild(container);
 
-  // Sécurité mémoire : certains PDF de webtoon/toomics n'ont qu'une seule page
-  // géante et très haute (tout l'épisode d'un coup). Sans cette limite, le canvas
-  // dépasse ce que Safari peut gérer et le rendu plante, surtout en zoomant.
-  const MAX_DIM = 4096;
-  const MAX_AREA = 16000000;
-  let outW = baseWidth * targetScale;
-  let outH = baseHeight * targetScale;
-  if (outW > MAX_DIM) targetScale = MAX_DIM / baseWidth;
-  outH = baseHeight * targetScale;
-  if (outH > MAX_DIM) targetScale = MAX_DIM / baseHeight;
-  outW = baseWidth * targetScale;
-  outH = baseHeight * targetScale;
-  if (outW * outH > MAX_AREA) {
-    targetScale *= Math.sqrt(MAX_AREA / (outW * outH));
-  }
+  await renderPDFPageTiles(page, container, dpr);
 
-  const viewport = page.getViewport({ scale: targetScale });
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(viewport.width);
-  canvas.height = Math.round(viewport.height);
-  canvas.style.width = "100%";
-  canvas.style.height = "auto";
-  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-  $("#readerViewer").innerHTML = "";
-  $("#readerViewer").appendChild(canvas);
   state.currentReader.zoomScale = 1;
-  enableZoomPan(canvas, (s) => (state.currentReader.zoomScale = s));
+  enableZoomPan(container, (s) => (state.currentReader.zoomScale = s));
   updatePageLabel();
 }
 
@@ -939,7 +915,7 @@ function enableZoomPan(el, onScaleChange) {
 
   el.style.transformOrigin = "center center";
   el.style.transition = "transform 0.15s ease-out";
-  el.style.touchAction = "none";
+  el.style.touchAction = "pan-y";
 
   function applyTransform() {
     el.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
