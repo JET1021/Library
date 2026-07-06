@@ -640,6 +640,8 @@ async function openReader(book) {
   $("#readerViewer").classList.remove("scroll-mode");
   const modeBtn = $("#readerModeBtn");
   modeBtn.style.display = "none";
+  const nativeBtn = $("#readerNativeBtn");
+  nativeBtn.style.display = "none";
   const viewer = $("#readerViewer");
   viewer.innerHTML = `<p class="reader-loading">Chargement…</p>`;
 
@@ -664,6 +666,11 @@ async function openReader(book) {
     await renderPDFPage(0);
     setupPageNav();
     enableWebtoonToggle();
+    nativeBtn.style.display = "inline-flex";
+    nativeBtn.onclick = () => {
+      const url = URL.createObjectURL(book.fileBlob);
+      window.open(url, "_blank");
+    };
     return;
   }
 
@@ -910,6 +917,7 @@ function closeReader() {
   $("#readerViewer").innerHTML = "";
   $("#readerViewer").classList.remove("scroll-mode");
   $("#readerModeBtn").style.display = "none";
+  $("#readerNativeBtn").style.display = "none";
   state.currentReader = null;
 }
 
