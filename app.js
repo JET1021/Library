@@ -667,10 +667,9 @@ async function openReader(book) {
     setupPageNav();
     enableWebtoonToggle();
     nativeBtn.style.display = "inline-flex";
-    nativeBtn.onclick = () => {
-      const url = URL.createObjectURL(book.fileBlob);
-      window.open(url, "_blank");
-    };
+    nativeBtn.title = "Ouvrir avec la visionneuse PDF native";
+    nativeBtn.textContent = "⧉";
+    nativeBtn.onclick = () => toggleNativePDFView(book);
     return;
   }
 
@@ -709,6 +708,43 @@ function enableWebtoonToggle() {
   modeBtn.textContent = "↕";
   modeBtn.title = "Passer en défilement continu (Webtoon)";
   modeBtn.onclick = toggleReaderMode;
+}
+
+// Affiche le PDF via la visionneuse native d'iOS, intégrée dans le lecteur
+// (iframe) plutôt qu'en nouvel onglet, ce qui évite un bug WebKit connu
+// (WebKitBlobResource) où les URL blob ne s'ouvrent pas correctement en
+// dehors du document qui les a créées, notamment depuis une PWA installée.
+function toggleNativePDFView(book) {
+  const r = state.currentReader;
+  if (!r) return;
+  const viewer = $("#readerViewer");
+  const nativeBtn = $("#readerNativeBtn");
+  const modeBtn = $("#readerModeBtn");
+
+  if (r.viewMode === "native") {
+    r.viewMode = "custom";
+    nativeBtn.textContent = "⧉";
+    nativeBtn.title = "Ouvrir avec la visionneuse PDF native";
+    modeBtn.style.display = "inline-flex";
+    $("#readerNav").style.display = "flex";
+    if (r.nativeUrl) {
+      URL.revokeObjectURL(r.nativeUrl);
+      r.nativeUrl = null;
+    }
+    renderPDFPage(r.page || 0);
+  } else {
+    r.scrollObserver?.disconnect();
+    r.scrollObserver = null;
+    r.viewMode = "native";
+    const url = URL.createObjectURL(book.fileBlob);
+    r.nativeUrl = url;
+    viewer.classList.remove("scroll-mode");
+    viewer.innerHTML = `<iframe src="${url}" class="native-pdf-frame" title="${escapeHTML(book.title)}"></iframe>`;
+    nativeBtn.textContent = "↩";
+    nativeBtn.title = "Revenir à la vue habituelle";
+    modeBtn.style.display = "none";
+    $("#readerNav").style.display = "none";
+  }
 }
 
 function toggleReaderMode() {
@@ -913,6 +949,7 @@ function goPage(delta) {
 
 function closeReader() {
   state.currentReader?.scrollObserver?.disconnect();
+  if (state.currentReader?.nativeUrl) URL.revokeObjectURL(state.currentReader.nativeUrl);
   $("#readerModal").classList.remove("open");
   $("#readerViewer").innerHTML = "";
   $("#readerViewer").classList.remove("scroll-mode");
