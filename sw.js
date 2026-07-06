@@ -16,6 +16,20 @@ const APP_SHELL = [
   "https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"
 ];
 
+// Stockage temporaire en mémoire des fichiers à servir via une URL normale du
+// site (contourne un bug WebKit où les URL "blob:" ne fonctionnent pas de
+// façon fiable dans une PWA installée en mode plein écran).
+const blobStore = new Map();
+
+self.addEventListener("message", (event) => {
+  const data = event.data || {};
+  if (data.type === "store-blob") {
+    blobStore.set(data.id, data.blob);
+  } else if (data.type === "clear-blob") {
+    blobStore.delete(data.id);
+  }
+});
+
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) =>
@@ -41,6 +55,19 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+
+  if (url.pathname.includes("/__blob__/")) {
+    const id = url.pathname.split("/__blob__/")[1];
+    const blob = blobStore.get(id);
+    if (blob) {
+      event.respondWith(new Response(blob, { headers: { "Content-Type": "application/pdf" } }));
+    } else {
+      event.respondWith(new Response("Fichier introuvable (session expirée)", { status: 404 }));
+    }
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
