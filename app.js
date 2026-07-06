@@ -722,6 +722,8 @@ function toggleReaderMode() {
     modeBtn.title = "Passer en défilement continu (Webtoon)";
     viewer.classList.remove("scroll-mode");
     $("#readerNav").style.display = "flex";
+    r.scrollObserver?.disconnect();
+    r.scrollObserver = null;
     if (r.book.format === "pdf") renderPDFPage(r.page);
     else renderImagePage(r.page);
   }
@@ -777,31 +779,73 @@ async function renderPDFPageTiles(page, container, dpr) {
 async function renderScrollModePDF() {
   const { pdf, total } = state.currentReader;
   const viewer = $("#readerViewer");
-  viewer.innerHTML = `<p class="reader-loading">Chargement des pages… (0/${total})</p>`;
+  viewer.innerHTML = `<p class="reader-loading">Préparation…</p>`;
   const dpr = Math.min(3, window.devicePixelRatio || 1);
-  const container = document.createElement("div");
-  container.className = "pdf-page-container";
 
+  // on récupère d'abord juste les dimensions de chaque page (rapide, sans
+  // dessiner de pixels) pour réserver l'espace exact de chacune et permettre
+  // un chargement progressif au défilement plutôt que tout dessiner d'un coup
+  const pageInfos = [];
   for (let i = 1; i <= total; i++) {
     if (state.currentReader?.mode !== "scroll") return;
     const page = await pdf.getPage(i);
-    await renderPDFPageTiles(page, container, dpr);
-    if (i === 1) {
-      viewer.innerHTML = "";
-      viewer.appendChild(container);
-    }
-    if (i < total) {
-      let progress = viewer.querySelector(".reader-progress");
-      if (!progress) {
-        progress = document.createElement("p");
-        progress.className = "reader-progress";
-      }
-      viewer.appendChild(progress);
-      progress.textContent = `Chargement… (${i}/${total})`;
-    } else {
-      viewer.querySelector(".reader-progress")?.remove();
-    }
+    const vp = page.getViewport({ scale: 1 });
+    pageInfos.push({ num: i, ratio: vp.height / vp.width });
   }
+  if (state.currentReader?.mode !== "scroll") return;
+
+  const container = document.createElement("div");
+  container.className = "pdf-page-container";
+  viewer.innerHTML = "";
+  viewer.appendChild(container);
+
+  const placeholders = pageInfos.map((info) => {
+    const ph = document.createElement("div");
+    ph.className = "pdf-page-placeholder";
+    ph.dataset.page = info.num;
+    ph.style.aspectRatio = `1 / ${info.ratio}`;
+    container.appendChild(ph);
+    return ph;
+  });
+
+  const rendered = new Set();
+
+  async function renderPlaceholder(ph, pageNum) {
+    if (rendered.has(pageNum)) return;
+    rendered.add(pageNum);
+    ph.style.aspectRatio = "";
+    const page = await pdf.getPage(pageNum);
+    // vérifie qu'on est toujours en mode scroll et que la case existe encore
+    // (l'utilisateur a pu changer de page/mode pendant le chargement)
+    if (state.currentReader?.mode !== "scroll" || !ph.isConnected) return;
+    await renderPDFPageTiles(page, ph, dpr);
+  }
+
+  function unrenderPlaceholder(ph, pageNum) {
+    if (!rendered.has(pageNum)) return;
+    rendered.delete(pageNum);
+    const info = pageInfos.find((p) => p.num === pageNum);
+    ph.innerHTML = "";
+    ph.style.aspectRatio = info ? `1 / ${info.ratio}` : "";
+  }
+
+  // marge large : on garde ~1200px chargés avant/après l'écran visible,
+  // ce qui suffit à un défilement fluide sans jamais garder tout le fichier
+  // dessiné en mémoire en même temps (essentiel pour les très gros PDF)
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const ph = entry.target;
+        const pageNum = parseInt(ph.dataset.page, 10);
+        if (entry.isIntersecting) renderPlaceholder(ph, pageNum);
+        else unrenderPlaceholder(ph, pageNum);
+      }
+    },
+    { root: viewer, rootMargin: "1200px 0px 1200px 0px" }
+  );
+  placeholders.forEach((ph) => observer.observe(ph));
+
+  state.currentReader.scrollObserver = observer;
   state.currentReader.zoomScale = 1;
   enableZoomPan(container, (s) => (state.currentReader.zoomScale = s));
 }
@@ -861,6 +905,7 @@ function goPage(delta) {
 }
 
 function closeReader() {
+  state.currentReader?.scrollObserver?.disconnect();
   $("#readerModal").classList.remove("open");
   $("#readerViewer").innerHTML = "";
   $("#readerViewer").classList.remove("scroll-mode");
