@@ -727,24 +727,47 @@ function toggleNativePDFView(book) {
     nativeBtn.title = "Ouvrir avec la visionneuse PDF native";
     modeBtn.style.display = "inline-flex";
     $("#readerNav").style.display = "flex";
-    if (r.nativeUrl) {
-      URL.revokeObjectURL(r.nativeUrl);
-      r.nativeUrl = null;
-    }
+    clearNativeBlob(r);
     renderPDFPage(r.page || 0);
   } else {
     r.scrollObserver?.disconnect();
     r.scrollObserver = null;
     r.viewMode = "native";
-    const url = URL.createObjectURL(book.fileBlob);
-    r.nativeUrl = url;
     viewer.classList.remove("scroll-mode");
-    viewer.innerHTML = `<iframe src="${url}" class="native-pdf-frame" title="${escapeHTML(book.title)}"></iframe>`;
+    viewer.innerHTML = `<p class="reader-loading">Préparation de la visionneuse native…</p>`;
+    activateNativeBlob(book, r, viewer);
     nativeBtn.textContent = "↩";
     nativeBtn.title = "Revenir à la vue habituelle";
     modeBtn.style.display = "none";
     $("#readerNav").style.display = "none";
   }
+}
+
+async function activateNativeBlob(book, r, viewer) {
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const controller = navigator.serviceWorker.controller;
+    if (!controller) throw new Error("Service worker non actif");
+    const id = "pdf-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    controller.postMessage({ type: "store-blob", id, blob: book.fileBlob });
+    r.nativeBlobId = id;
+    // petite marge pour laisser le service worker enregistrer le blob avant de le demander
+    await new Promise((res) => setTimeout(res, 80));
+    if (r.viewMode !== "native") return; // l'utilisateur a déjà changé d'avis
+    viewer.innerHTML = `<iframe src="./__blob__/${id}" class="native-pdf-frame" title="${escapeHTML(
+      book.title
+    )}"></iframe>`;
+  } catch (err) {
+    console.error(err);
+    viewer.innerHTML = `<p class="reader-loading">Impossible d'ouvrir la visionneuse native. Réessaie après avoir rechargé l'appli.</p>`;
+  }
+}
+
+function clearNativeBlob(r) {
+  if (r.nativeBlobId && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ type: "clear-blob", id: r.nativeBlobId });
+  }
+  r.nativeBlobId = null;
 }
 
 function toggleReaderMode() {
@@ -949,7 +972,7 @@ function goPage(delta) {
 
 function closeReader() {
   state.currentReader?.scrollObserver?.disconnect();
-  if (state.currentReader?.nativeUrl) URL.revokeObjectURL(state.currentReader.nativeUrl);
+  clearNativeBlob(state.currentReader || {});
   $("#readerModal").classList.remove("open");
   $("#readerViewer").innerHTML = "";
   $("#readerViewer").classList.remove("scroll-mode");
